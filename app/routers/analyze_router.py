@@ -1,15 +1,19 @@
 # app/routers/analyze_router.py
-from fastapi import APIRouter, UploadFile, File
+from fastapi import APIRouter, UploadFile, File, Query
 from app.services import analyze_service_optimized as analyzer
 from app.services import feedback_service
 import cv2
 import numpy as np
 import asyncio
+from app.config.feedback_criteria import PresentationType
 
 router = APIRouter(prefix="/analyze", tags=["Analyze"])
 
 @router.post("/record")
-async def analyze_record(file: UploadFile = File(...)):
+async def analyze_record(file: UploadFile = File(...),presentation_type: str = Query(
+        PresentationType.ONLINE_SMALL,
+        description="발표 유형 (online_small | small | large)"
+    )):
     """녹화 영상 전체 분석 (병렬 처리 + Whisper 1회 로드)
     녹화 영상 분석 API
     - mp4 업로드 시, test_record_multiprocess 기반으로 전체 분석
@@ -26,7 +30,7 @@ async def analyze_record(file: UploadFile = File(...)):
         analyzer.analyze_record_video,
         video_path
     )
-    feedback = feedback_service.generate_feedback(raw_result)
+    feedback = feedback_service.generate_feedback(raw_result, presentation_type)
 
     return {
         "raw_result": raw_result,

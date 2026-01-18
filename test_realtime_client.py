@@ -8,7 +8,7 @@ import mediapipe as mp
 
 # Install: pip install websockets opencv-python mediapipe
 
-SERVER_URL = "ws://127.0.0.1:8000/realtime"
+SERVER_URL = "ws://127.0.0.1:8000/realtime?type=large"
 VIDEO_PATH = "temp_video_posing.mp4" 
 
 # 랜드마크 인덱스 정의 (서버와 동일)
