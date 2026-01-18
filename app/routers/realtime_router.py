@@ -5,7 +5,7 @@ from app.services.feedback_manager import FeedbackManager
 import base64, cv2, numpy as np, json
 import time, uuid
 from app.core.redis import redis_client
-
+from app.config.feedback_criteria import PresentationType
 
 
 router = APIRouter(tags=["Realtime Analysis"])
@@ -19,7 +19,8 @@ async def realtime_socket(ws: WebSocket):
     """
     await ws.accept()
     print("[WebSocket] 연결 시작")
-    feedback_manager = FeedbackManager()
+    presentation_type = ws.query_params.get("type", "small")
+    feedback_manager = FeedbackManager(presentation_type=presentation_type) # 또는 SMALL / ONLINE_SMALL -> 스프링 연결 필요
     presentation_id = uuid.uuid4().hex
     presentation_start_time = time.time()
     await ws.send_text(json.dumps({

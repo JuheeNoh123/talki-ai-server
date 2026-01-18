@@ -2,9 +2,16 @@ from collections import deque
 import time
 import numpy as np
 from app.utils.analysis_utils import movement_speed
+from app.config.feedback_criteria import (
+    PresentationType,
+    FEEDBACK_CRITERIA,
+)
 
 class FeedbackManager:
-    def __init__(self):
+    def __init__(self, presentation_type: PresentationType.SMALL):
+        self.presentation_type = presentation_type
+        self.criteria = FEEDBACK_CRITERIA[presentation_type]
+
         # --- 시선(Gaze) 상태 ---
         self.gaze_horiz_buffer = deque(maxlen=30)
         self.gaze_vert_buffer  = deque(maxlen=30)
@@ -31,7 +38,7 @@ class FeedbackManager:
         """
         current_time = time.time()
         feedback_messages = []
-        print(result)
+    
         # 1. 시선 업데이트
         gaze = result.get("gaze")
         if gaze:
@@ -43,8 +50,7 @@ class FeedbackManager:
         else:
             self.gaze_horiz_buffer.append("N/A")
             self.gaze_vert_buffer.append("N/A")
-        print(self.gaze_horiz_buffer)
-        print(self.gaze_vert_buffer)
+    
         # =====================
         # 2. 시선 판단 (수평 + 수직 동일)
         # =====================
@@ -52,34 +58,43 @@ class FeedbackManager:
             current_time - self.last_gaze_feedback_time > self.COOLDOWN_SEC
             and len(self.gaze_horiz_buffer) >= 10   # 테스트용 완화
         ):
+            front_count = self.gaze_horiz_buffer.count("center")
+            front_ratio = front_count / len(self.gaze_horiz_buffer)
+
+            if front_ratio < self.criteria["gaze_front_ratio"]:
+                feedback_messages.append(
+                    "정면을 바라보는 시간이 부족합니다. 청중을 더 자주 바라봐주세요."
+                )
+                self.last_gaze_feedback_time = current_time
+            '''
             # --- 수평 ---
-            h_counts = {x: self.gaze_horiz_buffer.count(x) for x in set(self.gaze_horiz_buffer)}
-            h_common = max(h_counts, key=h_counts.get)
-            h_ratio = h_counts[h_common] / len(self.gaze_horiz_buffer)
+            # h_counts = {x: self.gaze_horiz_buffer.count(x) for x in set(self.gaze_horiz_buffer)}
+            # h_common = max(h_counts, key=h_counts.get)
+            # h_ratio = h_counts[h_common] / len(self.gaze_horiz_buffer)
 
             # --- 수직 ---
-            v_counts = {x: self.gaze_vert_buffer.count(x) for x in set(self.gaze_vert_buffer)}
-            v_common = max(v_counts, key=v_counts.get)
-            v_ratio = v_counts[v_common] / len(self.gaze_vert_buffer)
+            # v_counts = {x: self.gaze_vert_buffer.count(x) for x in set(self.gaze_vert_buffer)}
+            # v_common = max(v_counts, key=v_counts.get)
+            # v_ratio = v_counts[v_common] / len(self.gaze_vert_buffer)
 
             # 수평 피드백
-            if h_ratio > 0.4:
-                if h_common == "left":
-                    feedback_messages.append("시선이 계속 왼쪽을 향해 있습니다. 중앙을 봐주세요.")
-                elif h_common == "right":
-                    feedback_messages.append("시선이 계속 오른쪽을 향해 있습니다. 중앙을 봐주세요.")
-                elif h_common == "N/A":
-                    feedback_messages.append("얼굴이 잘 보이지 않습니다. 정면을 바라봐주세요.")
+            # if h_ratio > 0.4:
+            #     if h_common == "left":
+            #         feedback_messages.append("시선이 계속 왼쪽을 향해 있습니다. 중앙을 봐주세요.")
+            #     elif h_common == "right":
+            #         feedback_messages.append("시선이 계속 오른쪽을 향해 있습니다. 중앙을 봐주세요.")
+            #     elif h_common == "N/A":
+            #         feedback_messages.append("얼굴이 잘 보이지 않습니다. 정면을 바라봐주세요.")
 
             # 수직 피드백
-            if v_ratio > 0.4:
-                if v_common == "up":
-                    feedback_messages.append("시선이 위쪽으로 향해 있습니다. 청중을 바라봐주세요.")
-                elif v_common == "down":
-                    feedback_messages.append("고개가 너무 숙여져 있습니다. 시선을 들어주세요.")
-
-            if feedback_messages:
-                self.last_gaze_feedback_time = current_time
+            # if v_ratio > 0.4:
+            #     if v_common == "up":
+            #         feedback_messages.append("시선이 위쪽으로 향해 있습니다. 청중을 바라봐주세요.")
+            #     elif v_common == "down":
+            #         feedback_messages.append("고개가 너무 숙여져 있습니다. 시선을 들어주세요.")
+            '''
+            
+            
 
 
 
@@ -98,8 +113,11 @@ class FeedbackManager:
             avg_speed = np.mean(self.movement_speeds)
             # print(f"[DEBUG] Avg Speed: {avg_speed:.4f}") # 디버깅용
             
-            if avg_speed > 0.02: # 0.05 -> 0.02로 완화
+            if avg_speed > self.criteria["pose_max"]:
                  feedback_messages.append("몸을 너무 많이 움직이고 있습니다. 조금 더 차분한 자세를 취해보세요.")
+                 self.last_pose_feedback_time = current_time
+            elif avg_speed < self.criteria["pose_min"]:
+                 feedback_messages.append("자세가 다소 경직되어 있습니다. 자연스러운 제스처를 사용해 보세요.")
                  self.last_pose_feedback_time = current_time
         
         # 3. 음성 업데이트
@@ -109,19 +127,20 @@ class FeedbackManager:
             if self.speech_start_time is None:
                 self.speech_start_time = current_time
             wpm = speech.get("wpm", 0)
-
-            if current_time - self.last_speech_feedback_time > self.COOLDOWN_SEC:
-                if wpm > 180:
-                    feedback_messages.append("말이 너무 빠릅니다. 조금 천천히 말씀해 보세요.")
-                    self.last_speech_feedback_time = current_time
-                elif wpm > 0 and wpm < 100:
-                    feedback_messages.append("말이 조금 느립니다. 자신감 있게 말씀해 보세요.")
-                    self.last_speech_feedback_time = current_time
-
             fillers = speech.get("fillers_freq", 0)
-            if fillers > 4 and (current_time - self.last_speech_feedback_time > self.COOLDOWN_SEC):
-                 feedback_messages.append("습관적인 추임새(음, 어)가 들립니다. 의식적으로 줄여보세요.")
-                 self.last_speech_feedback_time = current_time
+            if current_time - self.last_speech_feedback_time > self.COOLDOWN_SEC:
+                if wpm > self.criteria["wpm_max"]:
+                    feedback_messages.append("말이 다소 빠릅니다. 조금 천천히 말씀해 보세요.")
+                    self.last_speech_feedback_time = current_time
+                elif wpm < self.criteria["wpm_min"] and wpm > 0:
+                    feedback_messages.append("말이 다소 느립니다. 자신감 있게 말씀해 보세요.")
+                    self.last_speech_feedback_time = current_time
+
+                
+                if fillers > self.criteria["fillers_per_min"]:
+                    feedback_messages.append("습관적인 추임새(음, 어)가 들립니다. 의식적으로 줄여보세요.")
+                    self.last_speech_feedback_time = current_time
+                
         print(feedback_messages)
         if feedback_messages:
             return " / ".join(feedback_messages)
