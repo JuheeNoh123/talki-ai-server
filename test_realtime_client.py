@@ -8,7 +8,7 @@ import mediapipe as mp
 
 # Install: pip install websockets opencv-python mediapipe
 
-SERVER_URL = "ws://127.0.0.1:8000/realtime?type=large"
+SERVER_URL = "ws://127.0.0.1:8080/realtime?type=large"
 VIDEO_PATH = "temp_video_posing.mp4" 
 
 # 랜드마크 인덱스 정의 (서버와 동일)
@@ -99,10 +99,19 @@ async def test_realtime():
                 # Extract Landmarks
                 payload_data = extract_landmarks(face_res, pose_res)
                 payload_data["timestamp"] = time.time() * 1000
+
+                # --- Mock Speech Data (Simulated) ---
+                # 3초(30프레임)마다 한 번씩 음성이 인식되었다고 가정
+                if frame_count > 0 and frame_count % 30 == 0:
+                    payload_data["speech"] = {
+                        "text": "안녕하세요 반갑습니다 오늘 발표를 시작하겠습니다", # text가 있어야 로직이 돕니다.
+                        "wpm": 160,          # 말이 빠른 경우 테스트 (기준 150 초과)
+                        "fillers_freq": 2    # 추임새가 조금 있는 경우
+                    }
                 
                 # Send JSON
-                await websocket.send(json.dumps(payload_data))
-                
+                #await websocket.send(json.dumps(payload_data))
+                await websocket.send("hello")
                 # Receive response
                 response = await websocket.recv()
                 data = json.loads(response)

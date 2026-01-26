@@ -23,9 +23,9 @@ class FeedbackManager:
         self.last_pose_feedback_time = 0
 
         # --- 음성(Speech) 상태 (누적) ---
-        self.speech_start_time = None # 최초 음성 감지 시간
-        self.total_words = 0
-        self.total_fillers = 0
+        self.speech_start_time = None 
+        self.wpm_buffer = deque(maxlen=5)      # WPM 이동 평균용 (최근 5번 업데이트)
+        self.filler_buffer = deque(maxlen=5)   # 추임새 빈도 이동 평균용
         self.last_speech_feedback_time = 0
         
         # --- 쿨다운 (재알림 방지) ---
@@ -96,8 +96,6 @@ class FeedbackManager:
             
             
 
-
-
         # 2. 자세 업데이트 (움직임 속도)
         curr_landmarks = result.get("pose_landmarks")
         if curr_landmarks:
@@ -120,26 +118,39 @@ class FeedbackManager:
                  feedback_messages.append("자세가 다소 경직되어 있습니다. 자연스러운 제스처를 사용해 보세요.")
                  self.last_pose_feedback_time = current_time
         
-        # 3. 음성 업데이트
+        # 3. 음성 업데이트 (이동 평균 적용)
+        '''
+        짧은 순간 말을 빨리 해도, 평균적으로 괜찮다면 불필요한 경고가 줄어듦
+        또한 피드백이 발생하면 버퍼를 비워서 새로운 구간을 다시 측정
+        '''
         speech = result.get("speech", {})
         if speech and speech.get("text"):
-
-            if self.speech_start_time is None:
-                self.speech_start_time = current_time
             wpm = speech.get("wpm", 0)
             fillers = speech.get("fillers_freq", 0)
-            if current_time - self.last_speech_feedback_time > self.COOLDOWN_SEC:
-                if wpm > self.criteria["wpm_max"]:
+            
+            self.wpm_buffer.append(wpm)
+            self.filler_buffer.append(fillers)
+
+            # 버퍼가 어느 정도 찼을 때만 피드백 (e.g. 최소 1개 이상이면 동작하되, 평균값 사용)
+            if current_time - self.last_speech_feedback_time > self.COOLDOWN_SEC and len(self.wpm_buffer) > 0:
+                avg_wpm = sum(self.wpm_buffer) / len(self.wpm_buffer)
+                avg_fillers = sum(self.filler_buffer) / len(self.filler_buffer)
+                
+                # WPM 피드백
+                if avg_wpm > self.criteria["wpm_max"]:
                     feedback_messages.append("말이 다소 빠릅니다. 조금 천천히 말씀해 보세요.")
                     self.last_speech_feedback_time = current_time
-                elif wpm < self.criteria["wpm_min"] and wpm > 0:
+                    self.wpm_buffer.clear() # 피드백 후 버퍼 초기화 (새로운 흐름 측정)
+                elif avg_wpm < self.criteria["wpm_min"] and avg_wpm > 0:
                     feedback_messages.append("말이 다소 느립니다. 자신감 있게 말씀해 보세요.")
                     self.last_speech_feedback_time = current_time
-
+                    self.wpm_buffer.clear()
                 
-                if fillers > self.criteria["fillers_per_min"]:
+                # 추임새 피드백
+                if avg_fillers > self.criteria["fillers_per_min"]:
                     feedback_messages.append("습관적인 추임새(음, 어)가 들립니다. 의식적으로 줄여보세요.")
-                    self.last_speech_feedback_time = current_time
+                    self.last_speech_feedback_time = current_time # WPM과 쿨다운 공유 (너무 많은 메시지 방지)
+                    self.filler_buffer.clear()
                 
         print(feedback_messages)
         if feedback_messages:
