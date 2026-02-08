@@ -10,10 +10,13 @@ from app.config.feedback_criteria import PresentationType
 router = APIRouter(prefix="/analyze", tags=["Analyze"])
 
 @router.post("/record")
-async def analyze_record(file: UploadFile = File(...),presentation_type: str = Query(
+async def analyze_record(
+    presentation_type: str = Query(
         PresentationType.ONLINE_SMALL,
         description="발표 유형 (online_small | small | large)"
-    )):
+    ),
+    file: UploadFile = File(...)
+):
     """녹화 영상 전체 분석 (병렬 처리 + Whisper 1회 로드)
     녹화 영상 분석 API
     - mp4 업로드 시, test_record_multiprocess 기반으로 전체 분석
