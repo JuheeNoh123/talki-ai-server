@@ -1,0 +1,33 @@
+# ===== Web / API =====
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+requests
+
+# ===== Async / Utils =====
+httpx
+aiofiles
+orjson
+
+# ===== Data / Math =====
+numpy
+scipy
+
+# ===== AI / ML =====
+torch
+torchaudio
+transformers
+sentencepiece
+
+# ===== Audio / Speech (TALKI 용) =====
+soundfile
+librosa
+
+# ===== Image / Vision (MediaPipe 대비) =====
+opencv-python
+pillow
+
+# ===== Dev / Debug =====
+tqdm
+rich
