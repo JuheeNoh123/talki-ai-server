@@ -142,16 +142,14 @@ Response
 - 분석 요청 처리
 - WebSocket 통신
 
-👉 Spring Server Repository  
-[(Spring 레포 링크)](https://github.com/JuheeNoh123/talki_spring)
+👉 [Spring Server Repository](https://github.com/JuheeNoh123/talki_spring)
 
 ### FastAPI AI Server
 - 영상 / 음성 분석
 - AI 모델 처리
 - 분석 결과 반환
 
-👉 FastAPI Server Repository  
-[(FastAPI 레포 링크)](https://github.com/JuheeNoh123/talki_fastAPI)
+👉 [FastAPI Server Repository](https://github.com/JuheeNoh123/talki_fastAPI)
 ---
 
 ## 👨‍💻 My Role
