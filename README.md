@@ -143,7 +143,7 @@ Response
 - WebSocket 통신
 
 👉 Spring Server Repository  
-(여기에 Spring 레포 링크)
+[(Spring 레포 링크)](https://github.com/JuheeNoh123/talki_spring)
 
 ### FastAPI AI Server
 - 영상 / 음성 분석
@@ -151,8 +151,7 @@ Response
 - 분석 결과 반환
 
 👉 FastAPI Server Repository  
-(여기에 FastAPI 레포 링크)
-
+[(FastAPI 레포 링크)](https://github.com/JuheeNoh123/talki_fastAPI)
 ---
 
 ## 👨‍💻 My Role
