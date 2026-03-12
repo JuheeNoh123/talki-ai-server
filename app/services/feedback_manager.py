@@ -124,6 +124,8 @@ class FeedbackManager:
         또한 피드백이 발생하면 버퍼를 비워서 새로운 구간을 다시 측정
         '''
         speech = result.get("speech", {})
+        if speech.get("silence"):
+            feedback_messages.append("발표 중 정적이 길어졌습니다. 이어서 말씀해 보세요.")
         if speech and speech.get("text"):
             wpm = speech.get("wpm", 0)
             fillers = speech.get("fillers_freq", 0)

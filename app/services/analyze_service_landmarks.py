@@ -22,3 +22,8 @@ def analyze_realtime_landmarks(data: dict):
         feedback["pose_detected"] = False
 
     return feedback
+
+def decode_audio(audio_base64):
+    audio_bytes = base64.b64decode(audio_base64)
+    audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
+    return audio_np
