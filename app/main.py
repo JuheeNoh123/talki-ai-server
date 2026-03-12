@@ -5,6 +5,7 @@ multiprocessing.set_start_method("spawn", force=True)
 
 from dotenv import load_dotenv
 load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
