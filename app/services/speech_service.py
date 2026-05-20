@@ -1,155 +1,29 @@
 # app/services/speech_service.py
 # 음성 분석 서비스 (완전 독립 모듈 - cv2/mediapipe 의존 없음)
 # 기능:
-#   - analyze_chunk()        : 실시간 청크 말속도 분석
-#   - analyze_full_audio()   : 전체 오디오 말속도 최종 분석
-#   - analyze_pronunciation(): 전체 오디오 발음 정확도 분석
+#   - analyze_chunk()          : 실시간 청크 말속도 분석
+#   - analyze_full_audio()     : 전체 오디오 말속도 최종 분석
+#   - analyze_pronunciation()  : 전체 오디오 발음 정확도 분석
+#   - analyze_script_reading() : 스크립트 낭독 통합 분석 (말속도 + 발음, Whisper 1회 호출)
 
 from __future__ import annotations
 
-import multiprocessing
-import tempfile, wave, os
+import tempfile, wave, os, re
 import numpy as np
-import torch
 
 from app.config.feedback_criteria import FEEDBACK_CRITERIA
+from app.services.whisper_service import whisper_service
 
 
 # =============================================================================
-# Whisper worker 함수 (별도 프로세스에서 실행)
-# =============================================================================
-def _whisper_worker(conn):
-    """Whisper 모델을 로드하고 Pipe로 요청을 받아 STT 처리"""
-    try:
-        print("[SpeechWhisper] 초기화 중...")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[SpeechWhisper] Device: {device}")
-
-        import whisper
-        model = whisper.load_model("small", device=device)
-        print("[SpeechWhisper] 모델 로드 완료. 대기 중...")
-
-        while True:
-            if not conn.poll(timeout=None):
-                continue
-
-            audio_path = conn.recv()
-            if audio_path is None:  # 종료 신호
-                break
-
-            initial_prompt = "어, 음, 그, 저, 뭐, 아"
-
-            print(f"[SpeechWhisper] STT 요청 수신: {audio_path}")
-
-            try:
-                result = model.transcribe(
-                    audio_path,
-                    language="ko",
-                    word_timestamps=True,
-                    initial_prompt=initial_prompt
-                )
-                stats = _calc_wpm(result)
-                conn.send({"status": "success", "data": stats})
-                print(f"[SpeechWhisper] 완료 | WPM: {stats['wpm']:.1f}")
-
-            except Exception as e:
-                print(f"[SpeechWhisper] 에러: {e}")
-                conn.send({"status": "error", "message": str(e)})
-
-    except Exception as e:
-        try:
-            conn.send({"status": "fatal_error", "message": str(e)})
-        except:
-            pass
-    finally:
-        print("[SpeechWhisper] 프로세스 종료")
-
-
-# 별도 worker 함수를 사용하는 이유.
-# 기존 whisper_service(녹화 영상 분석용)를 재사용하지 않고 자체 worker를 두는 이유는 사용 목적이 달라서.
-
-# whisper_service는 영상 분석 파이프라인(test_record_multiprocess)의 일부로,
-# import 시점에 MediaPipe(FaceMesh, Pose) 모델까지 함께 초기화됨.
-# 하지만 이 서비스에서는 순수 음성 분석(말속도, 발음 평가)만 필요하므로
-# cv2/mediapipe 의존성이 없는 경량 worker를 별도로 운영함.
-
-# 실제로 기존 whisper_service를 공유하려 했을 때 MediaPipe 초기화가
-# 메인 프로세스 import 단계에서 freeze를 일으켜 정상 동작하지 않았음.
-
-# A의 방식으로 수정하는 방향이 맞다고 생각이 된다면, speech_service에서 선언한 whisper을 whisper_service에서 가져다쓰는 방향이 더 알맞지 않을까 싶음
-
-
-# =============================================================================
-# WPM 계산 함수
-# =============================================================================
-def _calc_wpm(transcribe_result, min_seconds=3.0) -> dict:
-    """Whisper 결과에서 WPM 계산"""
-    segs = transcribe_result.get("segments", [])
-    text = transcribe_result.get("text", "").strip()
-
-    if not segs:
-        return {"text": text, "wpm": 0.0}
-
-    # 세그먼트 사이 침묵 gap을 제외한 실제 발화 시간만 합산
-    speaking_dur = sum(s["end"] - s["start"] for s in segs)
-
-    # 앞뒤 공백 제거 후 split — 공백만 있는 세그먼트는 단어 수 0으로 처리
-    words = sum(len(s["text"].strip().split()) for s in segs if s["text"].strip())
-    wpm   = (words / (speaking_dur / 60.0)) if speaking_dur >= min_seconds else 0.0
-
-    return {"text": text, "wpm": round(wpm, 1)}
-
-
-# =============================================================================
-# Whisper 프로세스 관리 클래스
-# =============================================================================
-class _SpeechWhisperService:
-    # 메인 프로세스와 whisper 프로세스 사이 통신 채널과 프로세스 객체 생성
-    def __init__(self):
-        self.parent_conn, self.child_conn = multiprocessing.Pipe()
-        self.process = multiprocessing.Process(
-            target=_whisper_worker,
-            args=(self.child_conn,),
-            daemon=True
-        )
-        self.started = False
-
-    # whisper worker 프로세스 실제로 띄움. started로 중복 실행 방지
-    def start(self):
-        if not self.started:
-            self.process.start()
-            self.started = True
-
-    # 오디오 파일 경로를 pipe로 worker에게 전달. 결과 안 기다리고 반환.
-    def transcribe_async(self, audio_path: str):
-        self.parent_conn.send(audio_path)
-
-    # worker가 처리 완료한 결과를 pipe에서 꺼냄. 결과 올 때까지 블로킹.
-    def get_result(self) -> dict:
-        return self.parent_conn.recv()
-
-
-# Whisper 인스턴스 (첫 호출 시 초기화)
-_whisper: _SpeechWhisperService = None
-
-def _get_whisper() -> _SpeechWhisperService:
-    """Lazy initialization - 처음 호출 시에만 프로세스 시작"""
-    global _whisper
-    if _whisper is None:
-        _whisper = _SpeechWhisperService()
-        _whisper.start()
-    return _whisper
-
-
-# =============================================================================
-# 공통 헬퍼: numpy 배열 → wav 저장 후 Whisper 실행 → 결과 반환
+# 공통 헬퍼: numpy 배열 → wav 저장 후 whisper_service 실행 → speech_stats 반환
 # =============================================================================
 def _transcribe(audio_np: np.ndarray) -> dict | None:
     """
     세 분석 함수(analyze_chunk, analyze_full_audio, analyze_pronunciation)의
     공통 로직을 처리한다.
     - numpy 배열을 임시 wav 파일로 저장
-    - Whisper worker에 전달 후 결과 수신
+    - whisper_service에 전달 후 결과 수신
     - 임시 파일 삭제
     실패 시 None 반환
     """
@@ -164,11 +38,10 @@ def _transcribe(audio_np: np.ndarray) -> dict | None:
         wf.setframerate(16000) # Whisper 요구 샘플레이트 — 프론트에서 16000Hz로 맞춰 전송 => 문제 X
         wf.writeframes(audio_np.tobytes())
 
-    # Whisper에 오디오를 넘기고 결과를 받아오는 코드. 
+    # Whisper에 오디오를 넘기고 결과를 받아오는 코드.
     try:
-        whisper = _get_whisper()
-        whisper.transcribe_async(wav_path)
-        result = whisper.get_result()
+        whisper_service.transcribe_async(wav_path)
+        result = whisper_service.get_result()
 
         if result["status"] != "success":
             print(f"[SpeechService] STT 실패: {result.get('message')}")
@@ -208,7 +81,7 @@ def analyze_chunk(audio_np: np.ndarray, presentation_type: str = "small") -> dic
     # 발표 유형별 WPM 기준 가지고 옴. 기본값은 발표 유형(small)
     criteria = FEEDBACK_CRITERIA.get(presentation_type, FEEDBACK_CRITERIA["small"])
 
-    # 공통 헬퍼로 음성 파일 저장 -> whisper 실행 -> 결과 수신 처리. 
+    # 공통 헬퍼로 음성 파일 저장 -> whisper 실행 -> 결과 수신 처리.
     data = _transcribe(audio_np)
     if data is None:
         return None
@@ -216,7 +89,7 @@ def analyze_chunk(audio_np: np.ndarray, presentation_type: str = "small") -> dic
     # 헬퍼에서 반환한 결과에서 WPM 수치만 꺼냄
     wpm = data["wpm"]
 
-    # 꺼낸 수치를 기준값과 비교해 속도 상태를 판정. 
+    # 꺼낸 수치를 기준값과 비교해 속도 상태를 판정.
     if wpm > criteria["wpm_max"]:
         speed_status = "fast"
     elif 0 < wpm < criteria["wpm_min"]:
@@ -246,7 +119,7 @@ def _calc_wpm_score(wpm: float, criteria: dict) -> int:
 
 # =============================================================================
 # 2단계: 전체 오디오 말속도 최종 분석
-# 위 코드(실시간)과 큰 차이는 없음. 라우터에서 그때마다 필요한 함수를 호출하는 방향이라 
+# 위 코드(실시간)과 큰 차이는 없음. 라우터에서 그때마다 필요한 함수를 호출하는 방향이라
 # 결과 출력의 차이점이 있음.
 # =============================================================================
 def analyze_full_audio(audio_np: np.ndarray, presentation_type: str = "small") -> dict:
@@ -281,7 +154,7 @@ _CHOSUNG  = list("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ")
 _JUNGSUNG = list("ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ")
 _JONGSUNG = list(" ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ")
 
-# 한국어 자모 분해. 
+# 한국어 자모 분해.
 def _decompose_jamo(text: str) -> str:
     result = []
     for char in text:
@@ -292,7 +165,7 @@ def _decompose_jamo(text: str) -> str:
         # 중성 index = (code // 28) % 21
         # 초성 index = code // (28 * 21)
 
-        # => 이걸 하는 이유는 글자단위로 비교하면 '발'과 '바'차이가 1인데, 
+        # => 이걸 하는 이유는 글자단위로 비교하면 '발'과 '바'차이가 1인데,
         # 자모 단위면 'ㄹ' 하나 차이라는 걸 알 수 있음.
         if 0xAC00 <= code <= 0xD7A3:
             code -= 0xAC00
@@ -311,7 +184,7 @@ def _decompose_jamo(text: str) -> str:
 
 def _edit_distance(s1: str, s2: str) -> int:
     """레벤슈타인 거리 계산 (자모열 비교에 사용)"""
-    # 두 문자열이 얼마나 다른지 숫자로 계산. 
+    # 두 문자열이 얼마나 다른지 숫자로 계산.
     # (ex) 'ㅂㅏㄹㅇㅡㅁ' -> 'ㅂㅏㅇㅡㅁ' : 거리 1
     # DP 방식으로 구현
     m, n = len(s1), len(s2)
@@ -329,7 +202,7 @@ def _edit_distance(s1: str, s2: str) -> int:
 
 # 자모 분리하고, 빠진 걸 찾았으니, 이젠 틀린 거 찾기.
 def _find_errors(reference: str, recognized: str) -> list:
-    import re, difflib
+    import difflib
 
     ref_words = re.sub(r'[^\w가-힣\s]', '', reference).split()
     rec_words = re.sub(r'[^\w가-힣\s]', '', recognized).split()
@@ -365,6 +238,40 @@ def _find_errors(reference: str, recognized: str) -> list:
 
 
 # =============================================================================
+# 발음 계산 헬퍼: analyze_pronunciation과 analyze_script_reading에서 공통으로 사용
+# =============================================================================
+def _calc_pronunciation(recognized_text: str, reference_text: str) -> dict:
+    # 특수문자 제거
+    ref_clean = re.sub(r'[^\w가-힣]', '', reference_text)
+    rec_clean = re.sub(r'[^\w가-힣]', '', recognized_text)
+
+    # 자모분해 -> 편집 거리 -> CER
+    ref_jamo = _decompose_jamo(ref_clean)
+    rec_jamo = _decompose_jamo(rec_clean)
+
+    dist = _edit_distance(ref_jamo, rec_jamo)
+    cer  = round(min(dist / len(ref_jamo), 1.0), 4) if ref_jamo else 1.0
+
+    # 패널티 3.5를 곱해서 점수 감점을 증폭.
+    # CER 기준에 맞춰 패널티를 지정.
+    # 현재는
+    # CER 1.65% => 94점
+    # CER 16.54% => 42점
+    # 이 나오는 3.5 패널티로 맞춰둔 상태.
+    PENALTY = 3.5
+    pronunciation_score = round(max(0.0, (1.0 - cer * PENALTY) * 100), 1)
+
+    # 틀린 단어 목록
+    errors = _find_errors(reference_text, recognized_text)
+
+    return {
+        "pronunciation_score": pronunciation_score,
+        "cer": cer,
+        "errors": errors,
+    }
+
+
+# =============================================================================
 # 3단계: 전체 오디오 발음 정확도 분석
 # =============================================================================
 def analyze_pronunciation(audio_np: np.ndarray, reference_text: str) -> dict:
@@ -384,8 +291,6 @@ def analyze_pronunciation(audio_np: np.ndarray, reference_text: str) -> dict:
         }
         실패 시 None 반환
     """
-    import re
-
     # Whisper로 오디오를 텍스트로 변환
     data = _transcribe(audio_np)
     if data is None:
@@ -394,35 +299,67 @@ def analyze_pronunciation(audio_np: np.ndarray, reference_text: str) -> dict:
     recognized_text = data["text"]
     print(f"[SpeechService] 인식된 텍스트: {recognized_text}")
 
-    # 특수문자 제거
-    ref_clean = re.sub(r'[^\w가-힣]', '', reference_text)
-    rec_clean = re.sub(r'[^\w가-힣]', '', recognized_text)
+    result = _calc_pronunciation(recognized_text, reference_text)
 
-    # 자모분해 -> 편집 거리 -> CER
-    ref_jamo = _decompose_jamo(ref_clean)
-    rec_jamo = _decompose_jamo(rec_clean)
-
-    dist = _edit_distance(ref_jamo, rec_jamo)
-    cer  = round(min(dist / len(ref_jamo), 1.0), 4) if ref_jamo else 1.0
-
-    # 패널티 3.5를 곱해서 점수 감점을 증폭.
-    # CER 기준에 맞춰 패널티를 지정. 
-    # 현재는 
-    # CER 1.65% => 94점
-    # CER 16.54% => 42점
-    # 이 나오는 3.5 패널티로 맞춰둔 상태.
-    PENALTY = 3.5
-    pronunciation_score = round(max(0.0, (1.0 - cer * PENALTY) * 100), 1)
-
-    # 틀린 단어 목록
-    errors = _find_errors(reference_text, recognized_text)
-
-    print(f"[SpeechService] CER: {cer} | 발음 점수: {pronunciation_score}")
-    print(f"[SpeechService] 틀린 부분: {errors if errors else '없음'}")
+    print(f"[SpeechService] CER: {result['cer']} | 발음 점수: {result['pronunciation_score']}")
+    print(f"[SpeechService] 틀린 부분: {result['errors'] if result['errors'] else '없음'}")
 
     return {
-        "pronunciation_score": pronunciation_score,
-        "cer": cer,
+        "pronunciation_score": result["pronunciation_score"],
+        "cer": result["cer"],
         "recognized_text": recognized_text,
-        "errors": errors,
+        "errors": result["errors"],
+    }
+
+
+# =============================================================================
+# 메인: 스크립트 낭독 통합 분석 (말속도 + 발음, Whisper 1회 호출)
+# =============================================================================
+def analyze_script_reading(
+    audio_np: np.ndarray,
+    reference_text: str,
+    presentation_type: str = "small",
+) -> dict | None:
+    """
+    스크립트 낭독 세션 종료 후 전체 오디오를 한 번에 분석.
+    Whisper를 1회만 호출하여 말속도와 발음 점수를 동시에 계산한다.
+
+    Args:
+        audio_np: 전체 누적 오디오 numpy 배열 (int16, 16000Hz, mono)
+        reference_text: 사용자가 읽어야 할 기준 텍스트
+        presentation_type: 발표 유형 (small / large / online_small)
+
+    Returns:
+        {
+            "wpm": float,
+            "wpm_score": int,
+            "pronunciation_score": float,
+            "cer": float,
+            "recognized_text": str,
+            "errors": list,
+        }
+        실패 시 None 반환
+    """
+    criteria = FEEDBACK_CRITERIA.get(presentation_type, FEEDBACK_CRITERIA["small"])
+
+    # Whisper 1회 호출로 WPM + 발음 모두 처리
+    data = _transcribe(audio_np)
+    if data is None:
+        return None
+
+    wpm = data["wpm"]
+    wpm_score = _calc_wpm_score(wpm, criteria)
+
+    recognized_text = data["text"]
+    pronunciation = _calc_pronunciation(recognized_text, reference_text)
+
+    print(f"[SpeechService] WPM: {wpm} | 점수: {wpm_score} | 발음: {pronunciation['pronunciation_score']}")
+
+    return {
+        "wpm": wpm,
+        "wpm_score": wpm_score,
+        "pronunciation_score": pronunciation["pronunciation_score"],
+        "cer": pronunciation["cer"],
+        "recognized_text": recognized_text,
+        "errors": pronunciation["errors"],
     }
