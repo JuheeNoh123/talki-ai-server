@@ -14,12 +14,16 @@ import os
 import sys
 from pathlib import Path
 
-TOPIC_MODEL_DIR = os.getenv("TOPIC_MODEL_DIR", "/app/Topic_model")
-sys.path.append(TOPIC_MODEL_DIR)
+TOPIC_MODEL_DIR = os.getenv(
+    "TOPIC_MODEL_DIR",
+    str(Path(__file__).resolve().parent.parent.parent / "Topic_model")
+)
+if TOPIC_MODEL_DIR not in sys.path:
+    sys.path.insert(0, TOPIC_MODEL_DIR)
 
 SPRING_URL = os.getenv("SPRING_URL")
 
-from service_scorer import ServiceScorer
+from Topic_model.service_scorer import ServiceScorer
 
 scorer = ServiceScorer()
 
