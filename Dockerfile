@@ -23,12 +23,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt --no-cache-dir
 
-# 소스코드 복사
+# 소스코드 복사 (Topic_model 포함 - .dockerignore에서 제외됨)
 COPY . .
-
-# Topic_model 복사 (ML 모델 포함)
-# 빌드 전에 Topic_model 폴더를 프로젝트 루트에 넣어두세요
-COPY Topic_model /app/Topic_model
 
 # 환경변수
 ENV PYTHONUNBUFFERED=1
