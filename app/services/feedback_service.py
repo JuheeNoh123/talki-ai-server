@@ -85,7 +85,7 @@ def interpret_topic(topic_result: dict) -> dict:
     keywords = topic_result.get("keywords", [])
     evidence = topic_result.get("evidence", {})
     sentence_analysis = topic_result.get("sentence_analysis", [])
-    worst = topic_result.get("worst_sentence", {})
+    worst = topic_result.get("worst_sentence") or {}
 
     low_coherence_count = sum(
         1 for s in sentence_analysis if "low_coherence" in s.get("flags", [])

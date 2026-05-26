@@ -162,8 +162,7 @@ async def realtime_socket(ws: WebSocket):
 
                 # Whisper STT 실행
                 try:
-                    whisper_service.transcribe_async(wav_path)
-                    whisper_res = whisper_service.get_result()
+                    whisper_res = whisper_service.transcribe(wav_path)
 
                     if whisper_res["status"] == "success":
                         speech_result = whisper_res["data"]

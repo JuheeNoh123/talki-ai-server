@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.vscode/
+.idea/
+*.wav
+*.mp4
+.env
+README.md
+ARCHITECTURE.md
+test_*.py
+!test_record_multiprocess.py
+profile_resources.py
