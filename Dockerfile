@@ -21,6 +21,10 @@ WORKDIR /app
 
 # requirements 먼저 복사 (캐시 활용)
 COPY requirements.txt .
+
+# torch CUDA 12.1 빌드 먼저 설치 (PyPI 기본 CPU 빌드 방지)
+RUN pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121 --no-cache-dir
+
 RUN pip install -r requirements.txt --no-cache-dir
 
 # 소스코드 복사 (Topic_model 포함 - .dockerignore에서 제외됨)

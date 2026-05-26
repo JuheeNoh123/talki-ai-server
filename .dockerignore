@@ -12,4 +12,5 @@ __pycache__/
 README.md
 ARCHITECTURE.md
 test_*.py
+!test_record_multiprocess.py
 profile_resources.py

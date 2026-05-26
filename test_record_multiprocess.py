@@ -32,8 +32,8 @@ def init_worker():
     
     mp_pose = mp.solutions.pose
     worker_pose = mp_pose.Pose(
-        static_image_mode=True, # 연속성이 깨지므로 True로 설정하여 독립적 감지 수행
-        model_complexity=2,
+        static_image_mode=True,
+        model_complexity=1,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     )
@@ -82,7 +82,10 @@ def frame_generator(video_path, stride=4):
         
     frame_count = 0
     while True:
-        ret, frame = cap.read()
+        try:
+            ret, frame = cap.read()
+        except SystemError:
+            break
         if not ret:
             break
         
