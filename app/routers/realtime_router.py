@@ -6,6 +6,7 @@ from starlette.websockets import WebSocketDisconnect
 
 
 #기본 라이브러리
+import asyncio
 import base64, cv2, numpy as np, json
 import time, uuid
 from datetime import datetime, timezone
@@ -26,7 +27,7 @@ import os
 
 
 #레디스에 구간(segment) 정보 저장하는 함수
-def save_segment(presentation_id, seg_type, start, end):
+async def save_segment(presentation_id, seg_type, start, end):
     #저장할 데이터 종류
     event = {
         "type": seg_type, # 구간 종류 (speech_fast / silence / pose_rigid / gaze_unstable)
@@ -36,17 +37,20 @@ def save_segment(presentation_id, seg_type, start, end):
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z" # 저장 시각 (UTC ISO 8601)
     }
 
-    # Redis 리스트에 push
-    redis_client.rpush(
-        f"presentation:{presentation_id}:segments",
-        json.dumps(event, ensure_ascii=False)
-    )
+    try:
+        # Redis 리스트에 push
+        await redis_client.rpush(
+            f"presentation:{presentation_id}:segments",
+            json.dumps(event, ensure_ascii=False)
+        )
 
-    # TTL 설정 (1시간)
-    redis_client.expire(
-        f"presentation:{presentation_id}:segments",
-        60 * 60
-    )
+        # TTL 설정 (1시간)
+        await redis_client.expire(
+            f"presentation:{presentation_id}:segments",
+            60 * 60
+        )
+    except Exception as e:
+        print(f"[Redis] save_segment 실패 (무시): {e}")
 
 router = APIRouter(tags=["Realtime Analysis"])
 
@@ -99,12 +103,20 @@ async def realtime_socket(ws: WebSocket):
         "presentationId": presentation_id
     }, ensure_ascii=False))
 
+    # 프론트 → Spring → FastAPI 구조에서 Spring이 close frame을 즉시 전달 안 할 수 있으므로
+    # receive에 타임아웃을 걸어 데이터 없으면 종료
+    RECEIVE_TIMEOUT = 3.0
+
     try:
         while True:
             # 현재 시각 기록 (구간 계산에 사용)
             current_time = time.time()
-            data = await ws.receive_json() #프론트에서 JSON 데이터 수신
-            
+            try:
+                data = await asyncio.wait_for(ws.receive_json(), timeout=RECEIVE_TIMEOUT)
+            except asyncio.TimeoutError:
+                print("[WebSocket] 수신 타임아웃 — 클라이언트 연결 종료로 판단")
+                break
+
             #1. 랜드마크 기반 분석 (시선 + 자세)
             raw_result = analyzer.analyze_realtime_landmarks(data)
 
@@ -131,7 +143,7 @@ async def realtime_socket(ws: WebSocket):
                         silence_duration = current_time - active_segments["silence"]
                         #일정 시간 이상 정적이면 segment 저장
                         if silence_duration > SILENCE_LIMIT:
-                            save_segment(
+                            await save_segment(
                                 presentation_id,
                                 "silence",
                                 active_segments["silence"] - presentation_start_time,
@@ -160,9 +172,12 @@ async def realtime_socket(ws: WebSocket):
                     wf.setframerate(16000)
                     wf.writeframes(full_audio.tobytes())
 
-                # Whisper STT 실행
+                # Whisper STT 실행 (blocking I/O → executor로 이벤트 루프 해방)
                 try:
-                    whisper_res = whisper_service.transcribe(wav_path)
+                    loop = asyncio.get_event_loop()
+                    whisper_res = await loop.run_in_executor(
+                        None, whisper_service.transcribe, wav_path
+                    )
 
                     if whisper_res["status"] == "success":
                         speech_result = whisper_res["data"]
@@ -198,7 +213,7 @@ async def realtime_socket(ws: WebSocket):
                     #slow 종료
                     if active_segments["speech_slow"] is not None:
 
-                        save_segment(
+                        await save_segment(
                             presentation_id,
                             "speech_slow",
                             active_segments["speech_slow"],
@@ -219,7 +234,7 @@ async def realtime_socket(ws: WebSocket):
                     #fast 종료
                     if active_segments["speech_fast"] is not None:
 
-                        save_segment(
+                        await save_segment(
                             presentation_id,
                             "speech_fast",
                             active_segments["speech_fast"],
@@ -232,7 +247,7 @@ async def realtime_socket(ws: WebSocket):
                 else:
                     # fast 종료
                     if active_segments["speech_fast"] is not None:
-                        save_segment(
+                        await save_segment(
                             presentation_id,
                             "speech_fast",
                             active_segments["speech_fast"],
@@ -242,7 +257,7 @@ async def realtime_socket(ws: WebSocket):
 
                     # slow 종료
                     if active_segments["speech_slow"] is not None:
-                        save_segment(
+                        await save_segment(
                             presentation_id,
                             "speech_slow",
                             active_segments["speech_slow"],
@@ -270,7 +285,7 @@ async def realtime_socket(ws: WebSocket):
 
                     if active_segments["pose_rigid"] is not None:
 
-                        save_segment(
+                        await save_segment(
                             presentation_id,
                             "pose_rigid",
                             active_segments["pose_rigid"] - presentation_start_time,
@@ -289,7 +304,7 @@ async def realtime_socket(ws: WebSocket):
 
                     if active_segments["pose_unstable"] is not None:
 
-                        save_segment(
+                        await save_segment(
                             presentation_id,
                             "pose_unstable",
                             active_segments["pose_unstable"] - presentation_start_time,
@@ -308,7 +323,7 @@ async def realtime_socket(ws: WebSocket):
 
                 if active_segments["gaze_unstable"] is not None:
 
-                    save_segment(
+                    await save_segment(
                         presentation_id,
                         "gaze_unstable",
                         active_segments["gaze_unstable"] - presentation_start_time,
@@ -327,12 +342,12 @@ async def realtime_socket(ws: WebSocket):
 
 
     except WebSocketDisconnect:
-        print("클라이언트 나감")
-        
+        print("[WebSocket] 클라이언트 정상 종료")
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"[WebSocket] 연결 종료: {e}")
+        print(f"[WebSocket] 비정상 종료: {e}")
 
     # 9. 발표 종료 시 열려있는 segment 정리
     finally:
@@ -350,13 +365,16 @@ async def realtime_socket(ws: WebSocket):
                 else:
                     start_elapsed = start_time - presentation_start_time
 
-                save_segment(
+                await save_segment(
                     presentation_id,
                     seg_type,
                     start_elapsed,
                     elapsed_now
                 )   
         
-        if ws.client_state.name != 'DISCONNECTED':
-            await ws.close()
+        try:
+            if ws.application_state.name not in ('DISCONNECTED',) and ws.client_state.name != 'DISCONNECTED':
+                await ws.close()
+        except RuntimeError:
+            pass
         

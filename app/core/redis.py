@@ -1,4 +1,4 @@
-import redis
+import redis.asyncio as aioredis
 import os
 
 
@@ -7,7 +7,7 @@ REDIS_PASS = os.getenv("REDIS_PASS")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
-redis_client = redis.Redis(
+redis_client = aioredis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
     password=REDIS_PASS,
