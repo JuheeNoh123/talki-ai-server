@@ -6,15 +6,24 @@ multiprocessing.set_start_method("spawn", force=True)
 from dotenv import load_dotenv
 load_dotenv()
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+
+from app.services.whisper_service import whisper_service
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    whisper_service.start()
+    yield
+    whisper_service.stop()
 
 app = FastAPI(
     title="TALKI Realtime Feedback API",
     description="실시간 멀티모달 분석 및 피드백 제공 API",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS 설정 (프론트엔드와 통신 가능하도록)

@@ -3,125 +3,10 @@ import numpy as np
 import json
 import time
 import multiprocessing
-import torch
 import os
 import threading
-from test_record_lazy import (
-    gaze_from_landmarks, 
-    movement_speed, 
-    extract_audio, 
-    speech_stats
-)
-
-# =============================================================================
-# 1. Whisper Worker Process (Persistent with Pipe)
-# =============================================================================
-
-def whisper_worker(conn):
-    """
-    Whisper 모델을 로드하고 요청을 처리하는 상주 프로세스 함수 (Pipe 사용)
-    """
-    try:
-        print("[Whisper Process] 초기화 시작...")
-        init_start = time.time()
-        
-        # GPU 확인 및 디바이스 설정
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[Whisper Process] Device: {device}")
-        
-        import whisper
-        # 모델 로드 (최초 1회 실행)
-        model = whisper.load_model("small", device=device)
-        init_elapsed = time.time() - init_start
-        print(f"[Whisper Process] 모델 로드 완료 (소요시간: {init_elapsed:.2f}s). 대기 중...")
-        
-        while True:
-            # Pipe에서 작업 가져오기
-            if not conn.poll(timeout=None): # 대기
-                continue
-                
-            task = conn.recv()
-            if task is None: # 종료 신호
-                break
-            
-            # task는 audio_path
-            audio_path = task
-            print(f"[Whisper Process] STT 분석 요청 수신: {audio_path}")
-            
-            # 절대 시간 기록 (Overlap 계산용)
-            abs_start = time.time()
-            
-            try:
-                # Transcribe
-                # initial_prompt: Whisper가 "어", "음" 등 필러를 suppression하지 않고
-                # 실제 전사하도록 유도. word_timestamps는 타임스탬프 확보용.
-                result = model.transcribe(
-                    audio_path,
-                    word_timestamps=True,
-                    initial_prompt="어, 음, 그, 저, 뭐, 아, 어어, 음음, 그래서, 근데, 어... 음... 그..."
-                )
-                
-                # 통계 계산
-                stats = speech_stats(result)
-                
-                abs_end = time.time()
-                transcribe_elapsed = abs_end - abs_start
-                print(f"[Whisper Process] 분석 완료 ({transcribe_elapsed:.2f}s)")
-                
-                # 결과 전송
-                conn.send({
-                    "status": "success", 
-                    "data": stats, 
-                    "timing": {
-                        "init": init_elapsed,
-                        "transcribe": transcribe_elapsed,
-                        "abs_start": abs_start,
-                        "abs_end": abs_end
-                    }
-                })
-            except Exception as e:
-                print(f"[Whisper Process] 분석 중 에러: {e}")
-                conn.send({"status": "error", "message": str(e)})
-            
-    except Exception as e:
-        try:
-            conn.send({"status": "fatal_error", "message": str(e)})
-        except:
-            pass
-    finally:
-        print("[Whisper Process] 종료")
-
-# Whisper를 독립된 프로세스로 실행
-class WhisperService:
-    def __init__(self):
-        # Queue 대신 메인 프로세스와 통신하기 위한 Pipe 사용 (양방향)
-        self.parent_conn, self.child_conn = multiprocessing.Pipe()
-        # Whisper 작업을 전담할 별도 프로세스 생성
-        self.process = multiprocessing.Process(
-            target=whisper_worker, 
-            args=(self.child_conn,),
-            daemon=True
-        )
-        self.started = False
-
-    def start(self):
-        if not self.started:
-            self.process.start()
-            self.started = True
-
-    def stop(self):
-        if self.started:
-            self.parent_conn.send(None)
-            self.process.join()
-            self.started = False
-
-    def transcribe_async(self, audio_path):
-        """비동기 요청 전송 (결과는 나중에 받음)"""
-        self.parent_conn.send(audio_path)
-
-    def get_result(self):
-        """결과 수신 대기"""
-        return self.parent_conn.recv()
+from app.utils.analysis_utils import gaze_from_landmarks, movement_speed
+from app.utils.audio_utils import extract_audio, speech_stats
 
 # =============================================================================
 # 2. Video Analysis Worker (Pool)
@@ -229,22 +114,25 @@ def analyze_parallel(video_path, whisper_service):
     audio_extract_elapsed = time.time() - audio_extract_start
     print(f"[Main] 오디오 추출 완료 ({audio_extract_elapsed:.2f}s)")
     
-    # 2. Whisper 분석 요청 (비동기)
+    # 2. Whisper 분석 요청 (별도 스레드 — lock 점유하면서 비디오 분석과 overlap)
+    whisper_res_holder = {}
+    whisper_thread = None
     if audio_path:
-        print("[Main] Whisper 서비스에 분석 요청 (Async)...")
-        # Whisper에 분석 요청 (비동기)
-        # 모델 로딩이 끝났다면 즉시 분석 시작, 아직 로딩 중이라면 로딩 완료 후 자동 시작
-        whisper_service.transcribe_async(audio_path)
-    
+        print("[Main] Whisper 서비스에 분석 요청 (Thread)...")
+        def _run_whisper():
+            whisper_res_holder["result"] = whisper_service.transcribe(audio_path)
+        whisper_thread = threading.Thread(target=_run_whisper, daemon=True)
+        whisper_thread.start()
+
     # 3. 비디오 분석 (Multiprocessing Pool + Generator)
     print("[Main] 비디오 분석 시작 (스트리밍 방식)...")
     video_abs_start = time.time()
-    
+
     speeds = []
     gazes = []
     prev_pose_points = None
     frame_cnt = 0
-    
+
     # 영상 분석을 위한 프로세스 풀(Pool) 생성
     # processes=3: 3개의 프로세스가 동시에 프레임을 나눠서 처리
     # processes=3: FaceMesh, Pose 등을 병렬로 처리
@@ -254,20 +142,21 @@ def analyze_parallel(video_path, whisper_service):
             frame_cnt += 1
             if gaze:
                 gazes.append(gaze)
-                
+
             spd = movement_speed(prev_pose_points, curr_points)
             if spd is not None:
                 speeds.append(spd)
             prev_pose_points = curr_points
-            
+
     video_abs_end = time.time()
     video_elapsed = video_abs_end - video_abs_start
     print(f"[Main] 비디오 분석 완료 ({frame_cnt} frames, {video_elapsed:.2f}s)")
-    
+
     # 4. Whisper 결과 수신
-    if audio_path:
+    if whisper_thread is not None:
         print("[Main] Whisper 결과 대기 중...")
-        whisper_res = whisper_service.get_result()
+        whisper_thread.join()
+        whisper_res = whisper_res_holder.get("result", {"status": "error", "message": "Thread failed"})
         try:
             os.remove(audio_path)
         except Exception:
@@ -400,23 +289,10 @@ def analyze_parallel(video_path, whisper_service):
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     import sys, json
-    from whisper import load_model
+    from app.services.whisper_service import whisper_service
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     video_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(BASE_DIR, "video_standard.mp4")
 
-    # 🔹 Whisper 모델 1회 로드
-    print("🎙 Whisper 모델 로드 중...")
-    service = WhisperService()
-    # 1. Whisper 서비스 시작 (모델 로딩 시작 - 약 3~4초 소요)
-    # 이 시점부터 Whisper 프로세스는 백그라운드에서 모델을 메모리에 올립니다.
-    service.start()
-    time.sleep(1) 
-    print("Whisper 모델 준비 완료")
-
-    # 🔹 분석 함수 호출 시 전달
-    result = analyze_parallel(video_path, service)
-
-    # 🔹 결과 출력 (FastAPI subprocess에서 받을 stdout)
+    result = analyze_parallel(video_path, whisper_service)
     print(json.dumps(result, ensure_ascii=False))
-    #service.stop() #테스트할때만 추가
     
