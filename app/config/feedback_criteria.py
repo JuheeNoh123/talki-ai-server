@@ -10,7 +10,7 @@ FEEDBACK_CRITERIA = {
         "wpm_max": 110,
         "fillers_per_min": 2,
         "pose_min": 0.010,
-        "pose_max": 0.018,
+        "pose_max": 0.040,
         "gaze_front_ratio": 0.65,
     },
     PresentationType.SMALL: {
@@ -18,7 +18,7 @@ FEEDBACK_CRITERIA = {
         "wpm_max": 110,
         "fillers_per_min": 3,
         "pose_min": 0.012,
-        "pose_max": 0.020,
+        "pose_max": 0.045,
         "gaze_front_ratio": 0.60,
     },
     PresentationType.LARGE: {
@@ -26,7 +26,7 @@ FEEDBACK_CRITERIA = {
         "wpm_max": 110,
         "fillers_per_min": 4,
         "pose_min": 0.014,
-        "pose_max": 0.022,
+        "pose_max": 0.050,
         "gaze_front_ratio": 0.55,
     },
 }

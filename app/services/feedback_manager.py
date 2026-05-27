@@ -52,18 +52,42 @@ class FeedbackManager:
             self.gaze_vert_buffer.append("N/A")
     
         # =====================
-        # 2. 시선 판단 (수평 + 수직 동일)
+        # 2. 시선 판단 (수평 + 수직 모두 반영)
         # =====================
         if (
             current_time - self.last_gaze_feedback_time > self.COOLDOWN_SEC
-            and len(self.gaze_horiz_buffer) >= 10   # 테스트용 완화
+            and len(self.gaze_horiz_buffer) >= 10
         ):
-            front_count = self.gaze_horiz_buffer.count("center")
-            front_ratio = front_count / len(self.gaze_horiz_buffer)
+            horiz_center = self.gaze_horiz_buffer.count("center")
+            vert_center  = self.gaze_vert_buffer.count("center")
+            n = len(self.gaze_horiz_buffer)
+
+            horiz_ratio = horiz_center / n
+            vert_ratio  = vert_center  / n
+            # 수평·수직 가중 평균 (수직에 더 가중 — 위/아래 보는 게 더 문제)
+            front_ratio = horiz_ratio * 0.4 + vert_ratio * 0.6
 
             if front_ratio < self.criteria["gaze_front_ratio"]:
+                # 어느 방향으로 많이 벗어났는지 구체적으로 안내
+                horiz_mode = max(
+                    set(self.gaze_horiz_buffer) - {"center", "N/A"},
+                    key=list(self.gaze_horiz_buffer).count,
+                    default=None,
+                )
+                vert_mode = max(
+                    set(self.gaze_vert_buffer) - {"center", "N/A"},
+                    key=list(self.gaze_vert_buffer).count,
+                    default=None,
+                )
+                dir_map = {"left": "왼쪽", "right": "오른쪽", "up": "위쪽", "down": "아래쪽"}
+                parts = []
+                if horiz_ratio < 0.6 and horiz_mode:
+                    parts.append(f"{dir_map.get(horiz_mode, horiz_mode)}을 자주 보고 있습니다")
+                if vert_ratio < 0.6 and vert_mode:
+                    parts.append(f"{dir_map.get(vert_mode, vert_mode)}을 자주 보고 있습니다")
+                detail = ", ".join(parts) if parts else "시선이 정면에서 벗어나 있습니다"
                 feedback_messages.append(
-                    "정면을 바라보는 시간이 부족합니다. 청중을 더 자주 바라봐주세요."
+                    f"시선이 불안정합니다. {detail}. 카메라(청중)를 더 자주 바라봐주세요."
                 )
                 self.last_gaze_feedback_time = current_time
                 result["gaze_unstable"] = True

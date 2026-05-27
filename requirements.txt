@@ -20,7 +20,7 @@ scikit-learn==1.8.0
 sentencepiece>=0.1.99
 
 # ===== Audio / Speech =====
-openai-whisper==20250625
+faster-whisper>=1.1.0
 pydub==0.25.1
 
 # ===== Vision =====

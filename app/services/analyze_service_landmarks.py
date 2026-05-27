@@ -9,10 +9,17 @@ def analyze_realtime_landmarks(data: dict):
     """
     feedback = {}
 
-    # 1. 시선 분석 (Shared Logic)
+    # 1. 시선 분석
     face_lms = data.get("face")
     if face_lms:
-        feedback["gaze"] = gaze_from_landmarks(face_lms)
+        gaze = gaze_from_landmarks(face_lms)
+        # 클라이언트(JS MediaPipe) Y축은 Python MediaPipe와 반대
+        # (JS: y=0이 아래, Python: y=0이 위) → 수직 방향 반전
+        if gaze["vert"] == "up":
+            gaze["vert"] = "down"
+        elif gaze["vert"] == "down":
+            gaze["vert"] = "up"
+        feedback["gaze"] = gaze
 
     # 2. 자세 분석 (데이터 패스스루)
     pose_lms = data.get("pose")
