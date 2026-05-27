@@ -13,7 +13,7 @@ scipy==1.17.1
 # torch CUDA 버전: https://pytorch.org/get-started/locally/ 에서 환경에 맞게 설치
 # CPU 환경: pip install torch==2.5.1
 # CUDA 12.1 환경: pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121
-torch>=2.5.1
+torch==2.5.1+cu121
 transformers==5.8.1
 sentence-transformers==5.5.0
 scikit-learn==1.8.0

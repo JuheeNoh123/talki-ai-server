@@ -23,7 +23,7 @@ WORKDIR /app
 COPY requirements.txt .
 
 # torch CUDA 12.1 빌드 먼저 설치 (PyPI 기본 CPU 빌드 방지)
-RUN pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121 --no-cache-dir
+RUN pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121 --no-cache-dir --retries 5 --timeout 600
 
 RUN pip install -r requirements.txt --no-cache-dir
 
