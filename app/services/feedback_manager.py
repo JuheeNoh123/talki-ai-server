@@ -108,7 +108,7 @@ class FeedbackManager:
         # 자세 체크 (평균 속도가 너무 빠르거나 느린 경우 트리거)
         if current_time - self.last_pose_feedback_time > self.COOLDOWN_SEC and len(self.movement_speeds) >= 15:
             avg_speed = np.mean(self.movement_speeds)
-            # print(f"[DEBUG] Avg Speed: {avg_speed:.4f}") # 디버깅용
+            print(f"[DEBUG] Avg Speed: {avg_speed:.4f}")
             
             if avg_speed > self.criteria["pose_max"]:
                  feedback_messages.append("몸을 너무 많이 움직이고 있습니다. 조금 더 차분한 자세를 취해보세요.")

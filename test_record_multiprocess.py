@@ -18,14 +18,16 @@ def init_worker():
     """Worker 프로세스 초기화: 각 프로세스마다 cv2·mediapipe를 로드"""
     global worker_face_mesh, worker_pose, worker_cv2, worker_gaze_from_landmarks
     import cv2
-    import mediapipe as mp
     from app.utils.analysis_utils import gaze_from_landmarks
 
     worker_cv2 = cv2
     worker_gaze_from_landmarks = gaze_from_landmarks
 
-    mp_face_mesh = mp.solutions.face_mesh
-    worker_face_mesh = mp_face_mesh.FaceMesh(
+    import mediapipe as _mp
+    _face_mesh_mod = _mp.solutions.face_mesh
+    _pose_mod = _mp.solutions.pose
+
+    worker_face_mesh = _face_mesh_mod.FaceMesh(
         static_image_mode=True,
         max_num_faces=1,
         refine_landmarks=True,
@@ -33,8 +35,7 @@ def init_worker():
         min_tracking_confidence=0.5,
     )
 
-    mp_pose = mp.solutions.pose
-    worker_pose = mp_pose.Pose(
+    worker_pose = _pose_mod.Pose(
         static_image_mode=True,
         model_complexity=1,
         min_detection_confidence=0.5,

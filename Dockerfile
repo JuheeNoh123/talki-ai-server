@@ -16,14 +16,14 @@ RUN apt-get update && apt-get install -y \
 # pip 업그레이드
 RUN python3.11 -m pip install --upgrade pip
 
+# torch CUDA 12.1 빌드 먼저 설치 (requirements.txt 변경과 무관하게 캐시 유지)
+RUN pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121 --no-cache-dir --retries 5 --timeout 600
+
 # 작업 디렉토리
 WORKDIR /app
 
-# requirements 먼저 복사 (캐시 활용)
+# requirements 복사 후 나머지 패키지 설치
 COPY requirements.txt .
-
-# torch CUDA 12.1 빌드 먼저 설치 (PyPI 기본 CPU 빌드 방지)
-RUN pip install torch==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121 --no-cache-dir --retries 5 --timeout 600
 
 RUN pip install -r requirements.txt --no-cache-dir
 

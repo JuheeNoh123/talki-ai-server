@@ -26,7 +26,7 @@ pydub==0.25.1
 # ===== Vision =====
 # opencv-contrib-python: mediapipe 의존성으로 설치됨 (opencv-python 대신 사용)
 opencv-contrib-python==4.13.0.92
-mediapipe==0.10.35
+mediapipe==0.10.14
 pillow==12.2.0
 
 # ===== LLM =====

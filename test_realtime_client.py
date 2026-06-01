@@ -110,8 +110,7 @@ async def test_realtime():
                     }
                 
                 # Send JSON
-                #await websocket.send(json.dumps(payload_data))
-                await websocket.send("hello")
+                await websocket.send(json.dumps(payload_data))
                 # Receive response
                 response = await websocket.recv()
                 data = json.loads(response)
