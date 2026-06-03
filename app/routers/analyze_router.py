@@ -23,9 +23,10 @@ if TOPIC_MODEL_DIR not in sys.path:
 
 SPRING_URL = os.getenv("SPRING_URL")
 
-from Topic_model.service_scorer import ServiceScorer
-
-scorer = ServiceScorer()
+from app.core.redis import redis_client
+from app.core.scorer import scorer
+from app.services import surprise_question_service
+import json
 
 router = APIRouter(prefix="/analyze", tags=["Analyze"])
 
@@ -94,9 +95,65 @@ async def background_analysis(req):
 
             raw_result["topic"] = topic_result
 
+            # 배치 분석 시선 Y축 플립 (실시간 analyze_service_landmarks와 동일 방향으로 통일)
+            eyes = raw_result.get("eyes", {})
+            if eyes:
+                old_vert_mode   = eyes.get("vert_mode", "center")
+                old_vert_counts = eyes.get("vert_counts", {})
+                raw_result["eyes"]["avg_dy"]     = -eyes.get("avg_dy", 0)
+                raw_result["eyes"]["vert_mode"]  = (
+                    "down" if old_vert_mode == "up" else
+                    "up"   if old_vert_mode == "down" else "center"
+                )
+                raw_result["eyes"]["vert_counts"] = {
+                    "up":     old_vert_counts.get("down", 0),
+                    "center": old_vert_counts.get("center", 0),
+                    "down":   old_vert_counts.get("up", 0),
+                }
+
+            # 돌발 질문 평가 (generate_feedback 전에 수행 → llm_feedback에 포함)
+            surprise_questions = []
+            if req.presentation_id:
+                try:
+                    pending_list = await redis_client.lrange(
+                        f"presentation:{req.presentation_id}:surprise_questions_pending", 0, -1
+                    )
+                    print(f"[SurpriseQ] presentation_id: {req.presentation_id}")
+                    print(f"[SurpriseQ] 대기 중인 질문 수: {len(pending_list)}")
+
+                    wpm       = raw_result.get("WPM", 100) or 100
+                    stt_words = raw_result.get("stt_text", "").split()
+
+                    for pending_json in pending_list:
+                        pending  = json.loads(pending_json)
+                        asked_at = pending.get("asked_at_seconds", 0)
+                        word_pos = min(int(asked_at * wpm / 60), len(stt_words))
+                        answer_text = " ".join(stt_words[word_pos: word_pos + 80])
+
+                        print(f"[SurpriseQ] 평가 중 — {pending['question'][:30]}...")
+                        result = await surprise_question_service.evaluate_answer(
+                            question=pending["question"],
+                            answer_text=answer_text,
+                            context_text=pending.get("context_text", ""),
+                            scorer=scorer,
+                        )
+                        surprise_questions.append({
+                            "question_id":      pending["question_id"],
+                            "question":         pending["question"],
+                            "asked_at_seconds": asked_at,
+                            "answer_text":      answer_text,
+                            **result,
+                        })
+                    print(f"[SurpriseQ] 평가 완료 — 총 {len(surprise_questions)}개")
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"[SurpriseQ] 돌발 질문 평가 실패: {e}")
+
             feedback = feedback_service.generate_feedback(
                 raw_result,
-                req.presentation_type
+                req.presentation_type,
+                surprise_questions,
             )
 
             gaze = raw_result.get("eyes", {})
@@ -150,16 +207,26 @@ async def background_analysis(req):
                     ),
                 },
                 "topic": raw_result.get("topic", {}),
+                "surprise_questions": surprise_questions,
             }
+
+            surprise_score = (
+                round(sum(q["content_score"] for q in surprise_questions) / len(surprise_questions))
+                if surprise_questions else None
+            )
 
             resjson = {
                 "s3_key": req.s3_key,
                 "raw_data": raw_data,
                 "scores": {
                     "total_score": feedback["total_score"],
-                    "score_detail": feedback["score_detail"],
+                    "score_detail": {
+                        **feedback["score_detail"],
+                        "surprise": surprise_score,
+                    },
                 },
                 "llm_feedback": feedback["llm_feedback"],
+                "surprise_questions": surprise_questions,
             }
 
             requests.post(

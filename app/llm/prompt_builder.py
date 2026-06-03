@@ -93,6 +93,21 @@ def build_feedback_prompt(tags: dict) -> str:
     else:
         topic_desc = "주제와의 연결이 전반적으로 약해 핵심 메시지가 잘 전달되지 않았습니다."
 
+    # 돌발 질문 결과 섹션 생성
+    surprise_questions = tags.get("surprise_questions", [])
+    sq_section = ""
+    if surprise_questions:
+        lines = ["\n[돌발 질문 평가 결과]"]
+        for i, sq in enumerate(surprise_questions, 1):
+            lines.append(f"{i}. 질문: {sq['question']}")
+            if sq.get("answered"):
+                lines.append(f"   답변 요약: {sq.get('answer_text', '')[:80]}")
+                lines.append(f"   내용 점수: {sq.get('content_score', 0)}점")
+                lines.append(f"   평가: {sq.get('feedback', '')}")
+            else:
+                lines.append("   답변: 발표자가 질문에 답하지 않고 발표를 이어나갔습니다.")
+        sq_section = "\n".join(lines)
+
     return f"""
 너는 발표 코칭 전문가다.
 아래에 이미 해석된 발표 진단 내용이 주어진다.
@@ -141,4 +156,6 @@ def build_feedback_prompt(tags: dict) -> str:
    예: '어, 오늘은, 음...' 과 같은 문장은 주제와 직접적인 연관이 없어 발표 흐름을 끊었습니다.
 7. 각 value는 5문장 이상 10문장 이하. JSON 외 텍스트 출력 금지.
 8. 제스처 ✅ 이고 rigid가 감지된 경우, 장점 표현은 반드시 "산만하지 않음/쓸데없는 제스처 없음" 각도로 작성하고, 자세/제스처 분석에서는 "제스처 추가 시 전달력 향상" 방향으로 작성할 것.
+9. 돌발 질문 평가 결과가 있으면 "돌발 질문 평가 결과" 항목에 각 질문별 답변 여부와 평가를 자연스럽게 서술할 것. 없으면 "이번 발표에서 돌발 질문이 없었습니다." 명시.
+{sq_section}
 """

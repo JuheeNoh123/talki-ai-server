@@ -110,14 +110,29 @@ def interpret_topic(topic_result: dict) -> dict:
         "worst_sentence": worst.get("sentence", ""),
     }
 
-def find_worst_metric(metrics):
-    diffs = {
-        "gaze": abs(metrics["gaze_diff"]),
-        "pose": abs(metrics["pose_diff"]),
-        "speech": abs(metrics["wpm_diff"]),
-        "filler": abs(metrics["fillers_diff"]),
+def find_worst_metric(metrics, score_detail):
+    """점수 기준 미달 항목 중 가장 나쁜 것을 반환. 모두 통과 시 가장 낮은 점수 항목."""
+    failing = {}
+    if score_detail["gaze"] < 80:
+        failing["gaze"] = score_detail["gaze"]
+    if score_detail["pose"] < 80:
+        failing["pose"] = score_detail["pose"]
+    if score_detail["speech_speed"] < 80:
+        failing["speech"] = score_detail["speech_speed"]
+    if score_detail["fillers"] < 80:
+        failing["filler"] = score_detail["fillers"]
+
+    if failing:
+        return min(failing, key=failing.get)
+
+    # 모두 통과 시 가장 낮은 점수 항목
+    all_scores = {
+        "gaze":   score_detail["gaze"],
+        "pose":   score_detail["pose"],
+        "speech": score_detail["speech_speed"],
+        "filler": score_detail["fillers"],
     }
-    return max(diffs, key=diffs.get)
+    return min(all_scores, key=all_scores.get)
         
 def derive_tags(score_detail, metrics, criteria, total_score, topic_result):
     tags = {}
@@ -135,11 +150,11 @@ def derive_tags(score_detail, metrics, criteria, total_score, topic_result):
 
     tags["total_score"] = total_score
 
-    tags["key_focus"] = find_worst_metric(metrics)
+    tags["key_focus"] = find_worst_metric(metrics, score_detail)
 
     return tags
 
-def generate_feedback(analysis_result: dict, presentation_type: str):
+def generate_feedback(analysis_result: dict, presentation_type: str, surprise_questions: list = []):
     criteria = FEEDBACK_CRITERIA[presentation_type]
     feedback = []
 
@@ -253,6 +268,7 @@ def generate_feedback(analysis_result: dict, presentation_type: str):
     internal_tags["metrics"] = internal_metrics
     internal_tags["score_detail"] = score_detail
     internal_tags["stt_text"] = analysis_result.get("stt_text", "")[:500]
+    internal_tags["surprise_questions"] = surprise_questions
 
     prompt = build_feedback_prompt(internal_tags)
     print(prompt)

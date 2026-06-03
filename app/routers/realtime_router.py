@@ -2,114 +2,125 @@
 from fastapi import APIRouter, WebSocket
 from app.services import analyze_service_landmarks as analyzer
 from app.services.feedback_manager import FeedbackManager
+from app.services.surprise_question_manager import SurpriseQuestionManager
+from app.services import surprise_question_service
 from starlette.websockets import WebSocketDisconnect
 
-
-#기본 라이브러리
 import asyncio
+import re
 import base64, cv2, numpy as np, json
 import time, uuid
 from datetime import datetime, timezone
 
-#레디스 (실시간 분석 결과 저장용)
 from app.core.redis import redis_client
-
-#발표 유형 설정
+from app.core.scorer import scorer
 from app.config.feedback_criteria import PresentationType
-
-#whisper 음성 분석 서비스
 from app.services.whisper_service import whisper_service
 
-#임시 오디오 파일 생성용
 import tempfile
 import wave
 import os
 
 
-#레디스에 구간(segment) 정보 저장하는 함수
-async def save_segment(presentation_id, seg_type, start, end):
-    #저장할 데이터 종류
-    event = {
-        "type": seg_type, # 구간 종류 (speech_fast / silence / pose_rigid / gaze_unstable)
-        "start": round(start, 1), # 발표 시작 기준 시작 시간
-        "end": round(end, 1), #발표 시작 기준 종료 시간
-        "duration": round(end - start, 1), # 구간 길이
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z" # 저장 시각 (UTC ISO 8601)
-    }
+# ── Redis 저장 헬퍼 ───────────────────────────────────────────────────────────
 
+async def save_segment(presentation_id, seg_type, start, end):
+    event = {
+        "type": seg_type,
+        "start": round(start, 1),
+        "end": round(end, 1),
+        "duration": round(end - start, 1),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    }
     try:
-        # Redis 리스트에 push
         await redis_client.rpush(
             f"presentation:{presentation_id}:segments",
             json.dumps(event, ensure_ascii=False)
         )
-
-        # TTL 설정 (1시간)
-        await redis_client.expire(
-            f"presentation:{presentation_id}:segments",
-            60 * 60
-        )
+        await redis_client.expire(f"presentation:{presentation_id}:segments", 60 * 60)
     except Exception as e:
         print(f"[Redis] save_segment 실패 (무시): {e}")
 
+
+async def save_question_pending(presentation_id: str, question_id: str,
+                                 question: str, asked_at_seconds: float, context_text: str):
+    """질문 전송 시 타임스탬프와 함께 Redis에 저장 (배치 분석에서 답변 평가에 사용)."""
+    record = {
+        "question_id":      question_id,
+        "question":         question,
+        "asked_at_seconds": round(asked_at_seconds, 1),
+        "context_text":     context_text,
+    }
+    try:
+        await redis_client.rpush(
+            f"presentation:{presentation_id}:surprise_questions_pending",
+            json.dumps(record, ensure_ascii=False)
+        )
+        await redis_client.expire(
+            f"presentation:{presentation_id}:surprise_questions_pending", 60 * 60
+        )
+    except Exception as e:
+        print(f"[Redis] save_question_pending 실패 (무시): {e}")
+
+
+# ── WAV 파일 생성 헬퍼 ────────────────────────────────────────────────────────
+
+def _write_wav(audio_frames: list) -> str:
+    full_audio = np.concatenate(audio_frames)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        wav_path = tmp.name
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(full_audio.tobytes())
+    return wav_path
+
+
+# ── 라우터 ────────────────────────────────────────────────────────────────────
+
 router = APIRouter(tags=["Realtime Analysis"])
 
-# 실시간 WebSocket 분석 엔드포인트
+
 @router.websocket("/realtime")
 async def realtime_socket(ws: WebSocket):
-    # 현재 진행 중인 "구간(segment)" 상태 저장 (값이 None이면 현재 구간 없음)
+
+    # ── 기존 상태 변수 ────────────────────────────────────────────────────────
     active_segments = {
         "speech_fast": None,
-        "speech_slow": None, 
+        "speech_slow": None,
         "pose_rigid": None,
-        "pose_unstable": None, 
+        "pose_unstable": None,
         "gaze_unstable": None,
-        "silence": None
+        "silence": None,
     }
 
-    
-    # 정적 판단 기준
-    SILENCE_THRESHOLD = 200 # 오디오 볼륨 기준
-    SILENCE_LIMIT = 3.0  # 3초 이상 정적이면 구간 기록, 피드백
-
-    # 오디오 버퍼 (STT 분석용)
-    audio_buffer = []
-
-    #프론트가 보내는 오디오 chunk 길이
-    audio_chunk_duration = 1.0
-
-    #마지막 STT 실행 시각
+    SILENCE_THRESHOLD    = 200
+    SILENCE_LIMIT        = 3.0
+    audio_buffer  = []
     last_stt_time = time.time()
+    STT_INTERVAL         = 5.0
+    RECEIVE_TIMEOUT      = 3.0
 
-    #STT 실행 간격
-    STT_INTERVAL = 5.0 
-
-    #WebSocket 연결 수락
     await ws.accept()
     print("[WebSocket] 연결 시작")
 
-    #발표 유형 (small/large/online_small)
-    presentation_type = ws.query_params.get("type", "small")
-    #실시간 피드백 관리 객체
-    feedback_manager = FeedbackManager(presentation_type=presentation_type) 
-    #발표 ID 생성
-    presentation_id = uuid.uuid4().hex
-    #발표 시작 시각
+    presentation_type       = ws.query_params.get("type", "small")
+    feedback_manager        = FeedbackManager(presentation_type=presentation_type)
+    presentation_id         = uuid.uuid4().hex
     presentation_start_time = time.time()
-    
-    #프론트에 session_start 이벤트 전송
+
     await ws.send_text(json.dumps({
         "type": "session_start",
         "presentationId": presentation_id
     }, ensure_ascii=False))
 
-    # 프론트 → Spring → FastAPI 구조에서 Spring이 close frame을 즉시 전달 안 할 수 있으므로
-    # receive에 타임아웃을 걸어 데이터 없으면 종료
-    RECEIVE_TIMEOUT = 3.0
+    # ── 돌발 질문 상태 변수 ───────────────────────────────────────────────────
+    sq_manager = SurpriseQuestionManager()
+    sq_manager.start(presentation_start_time)
 
     try:
         while True:
-            # 현재 시각 기록 (구간 계산에 사용)
             current_time = time.time()
             try:
                 data = await asyncio.wait_for(ws.receive_json(), timeout=RECEIVE_TIMEOUT)
@@ -117,229 +128,147 @@ async def realtime_socket(ws: WebSocket):
                 print("[WebSocket] 수신 타임아웃 — 클라이언트 연결 종료로 판단")
                 break
 
-            #1. 랜드마크 기반 분석 (시선 + 자세)
+            # ── 1. 랜드마크 기반 분석 (시선 + 자세) ← 기존 그대로 ────────────
             raw_result = analyzer.analyze_realtime_landmarks(data)
 
-            #2. 오디오 데이터 처리
+            # ── 2. 오디오 처리 ← 기존 그대로 ────────────────────────────────
             audio_base64 = data.get("audio")
             if audio_base64:
-                audio_np = analyzer.decode_audio(audio_base64) # base64-> numpy 오디오 변환
-                audio_buffer.append(audio_np) # 오디오 버퍼에 저장 (STT 용)
-                volume = np.abs(audio_np).mean() # 현재 오디오 볼륨 계산
+                audio_np = analyzer.decode_audio(audio_base64)
+                volume   = np.abs(audio_np).mean()
+                audio_buffer.append(audio_np)
 
-                #정적 구간 감지
                 if volume < SILENCE_THRESHOLD:
-                    
-                    #정적 시작
                     if active_segments["silence"] is None:
                         active_segments["silence"] = current_time
-                    
                     if "speech" not in raw_result:
                         raw_result["speech"] = {}
                     raw_result["speech"]["silence"] = True
                 else:
-                    #정적 종료
                     if active_segments["silence"] is not None:
                         silence_duration = current_time - active_segments["silence"]
-                        #일정 시간 이상 정적이면 segment 저장
                         if silence_duration > SILENCE_LIMIT:
                             await save_segment(
-                                presentation_id,
-                                "silence",
+                                presentation_id, "silence",
                                 active_segments["silence"] - presentation_start_time,
-                                current_time - presentation_start_time
+                                current_time - presentation_start_time,
                             )
-                    #정적 상태 종료
                     active_segments["silence"] = None
 
-            
-            
-            #3. Whisper 음성 분석 실행
+            # ── 3. Whisper STT ← 기존 그대로 ─────────────────────────────────
             speech_result = None
-
             if current_time - last_stt_time > STT_INTERVAL and len(audio_buffer) >= 3:
-                
-                # 오디오 버펴 합치기
-                full_audio = np.concatenate(audio_buffer) 
-                
-                # 임시 wav 파일 생성
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                    wav_path = tmp.name
-
-                with wave.open(wav_path, "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(16000)
-                    wf.writeframes(full_audio.tobytes())
-
-                # Whisper STT 실행 (blocking I/O → executor로 이벤트 루프 해방)
+                wav_path = _write_wav(audio_buffer)
                 try:
                     loop = asyncio.get_event_loop()
                     whisper_res = await loop.run_in_executor(
                         None, whisper_service.transcribe, wav_path
                     )
-
                     if whisper_res["status"] == "success":
                         speech_result = whisper_res["data"]
-
                 except Exception as e:
-                    print("whisper error: ",e)
-                
+                    print("whisper error:", e)
                 finally:
                     os.remove(wav_path)
-                
-                # 오디오 버퍼 초기화
-                audio_buffer.clear()
 
-                # STT 실행 시각 업데이트
+                audio_buffer.clear()
                 last_stt_time = current_time
-            
-            # 4. 말 속도(빠른,느린) 구간 감지
+
+            # ── 4. 말 속도 구간 감지 ← 기존 그대로 ──────────────────────────
             if speech_result:
                 if "speech" not in raw_result:
                     raw_result["speech"] = {}
-
                 raw_result["speech"].update(speech_result)
 
                 wpm = speech_result.get("wpm", 0)
 
-                #말 빠른 구간
                 if wpm > feedback_manager.criteria["wpm_max"]:
-                    #fast 시작
                     if active_segments["speech_fast"] is None:
                         active_segments["speech_fast"] = current_time - presentation_start_time
-
-                
-                    #slow 종료
                     if active_segments["speech_slow"] is not None:
-
-                        await save_segment(
-                            presentation_id,
-                            "speech_slow",
-                            active_segments["speech_slow"],
-                            current_time - presentation_start_time
-                        )
-
+                        await save_segment(presentation_id, "speech_slow",
+                                           active_segments["speech_slow"],
+                                           current_time - presentation_start_time)
                         active_segments["speech_slow"] = None
 
-                    
-
-                #말 느린 구간
                 elif wpm < feedback_manager.criteria["wpm_min"] and wpm > 0:
-                    #slow 시작
                     if active_segments["speech_slow"] is None:
                         active_segments["speech_slow"] = current_time - presentation_start_time
-                
-                
-                    #fast 종료
                     if active_segments["speech_fast"] is not None:
-
-                        await save_segment(
-                            presentation_id,
-                            "speech_fast",
-                            active_segments["speech_fast"],
-                            current_time - presentation_start_time
-                        )
-
+                        await save_segment(presentation_id, "speech_fast",
+                                           active_segments["speech_fast"],
+                                           current_time - presentation_start_time)
                         active_segments["speech_fast"] = None
-                
-                #정상 속도 구간
+
                 else:
-                    # fast 종료
                     if active_segments["speech_fast"] is not None:
-                        await save_segment(
-                            presentation_id,
-                            "speech_fast",
-                            active_segments["speech_fast"],
-                            current_time - presentation_start_time
-                        )
+                        await save_segment(presentation_id, "speech_fast",
+                                           active_segments["speech_fast"],
+                                           current_time - presentation_start_time)
                         active_segments["speech_fast"] = None
-
-                    # slow 종료
                     if active_segments["speech_slow"] is not None:
-                        await save_segment(
-                            presentation_id,
-                            "speech_slow",
-                            active_segments["speech_slow"],
-                            current_time - presentation_start_time
-                        )
+                        await save_segment(presentation_id, "speech_slow",
+                                           active_segments["speech_slow"],
+                                           current_time - presentation_start_time)
                         active_segments["speech_slow"] = None
-                    
 
-            # 5. 시선 자세 피드백 업데이트            
+                # [신규] STT 완료 후 돌발 질문 트리거 체크
+                sq_manager.add_stt(speech_result.get("text", ""))
+
+                if sq_manager.should_trigger(current_time):
+                    elapsed = round(current_time - presentation_start_time, 1)
+                    print(f"[SurpriseQ] 트리거 발동 — 누적 단어: {sq_manager.accumulated_words}개, 경과: {elapsed}초")
+                    sq_manager.start_generating(current_time)
+                    asyncio.create_task(_send_question(
+                        ws, sq_manager,
+                        presentation_id, presentation_start_time,
+                    ))
+
+            # ── 5. 시선/자세 피드백 업데이트 ← 기존 그대로 ──────────────────
             manager_feedback = feedback_manager.update(raw_result)
 
-            # 6. 자세 경직,산만 구간 감지
+            # ── 6. 자세 경직/산만 구간 감지 ← 기존 그대로 ───────────────────
             pose_landmarks = raw_result.get("pose_landmarks")
-
             if pose_landmarks:
-
                 avg_speed = np.mean(feedback_manager.movement_speeds) if feedback_manager.movement_speeds else 0
-                #자세 경직 구간
-                if avg_speed < feedback_manager.criteria["pose_min"]:
 
+                if avg_speed < feedback_manager.criteria["pose_min"]:
                     if active_segments["pose_rigid"] is None:
                         active_segments["pose_rigid"] = current_time
-
                 else:
-
                     if active_segments["pose_rigid"] is not None:
-
-                        await save_segment(
-                            presentation_id,
-                            "pose_rigid",
-                            active_segments["pose_rigid"] - presentation_start_time,
-                            current_time - presentation_start_time
-                        )
-
+                        await save_segment(presentation_id, "pose_rigid",
+                                           active_segments["pose_rigid"] - presentation_start_time,
+                                           current_time - presentation_start_time)
                         active_segments["pose_rigid"] = None
-                
-                #자세 산만 구간
-                if avg_speed > feedback_manager.criteria["pose_max"]:
 
+                if avg_speed > feedback_manager.criteria["pose_max"]:
                     if active_segments["pose_unstable"] is None:
                         active_segments["pose_unstable"] = current_time
-
                 else:
-
                     if active_segments["pose_unstable"] is not None:
-
-                        await save_segment(
-                            presentation_id,
-                            "pose_unstable",
-                            active_segments["pose_unstable"] - presentation_start_time,
-                            current_time - presentation_start_time
-                        )
-
+                        await save_segment(presentation_id, "pose_unstable",
+                                           active_segments["pose_unstable"] - presentation_start_time,
+                                           current_time - presentation_start_time)
                         active_segments["pose_unstable"] = None
 
-            # 7. 시선 불안정 구간 감지
+            # ── 7. 시선 불안정 구간 감지 ← 기존 그대로 ──────────────────────
             if raw_result.get("gaze_unstable"):
-
                 if active_segments["gaze_unstable"] is None:
                     active_segments["gaze_unstable"] = current_time
-
             else:
-
                 if active_segments["gaze_unstable"] is not None:
-
-                    await save_segment(
-                        presentation_id,
-                        "gaze_unstable",
-                        active_segments["gaze_unstable"] - presentation_start_time,
-                        current_time - presentation_start_time
-                    )
-
+                    await save_segment(presentation_id, "gaze_unstable",
+                                       active_segments["gaze_unstable"] - presentation_start_time,
+                                       current_time - presentation_start_time)
                     active_segments["gaze_unstable"] = None
 
-
-            # 8. 프론트에 실시간 피드백 전송
+            # ── 8. 실시간 피드백 전송 ← 기존 그대로 ──────────────────────────
             await ws.send_text(json.dumps({
                 "type": "feedback",
                 "raw_result": raw_result,
-                "data": manager_feedback
+                "data": manager_feedback,
             }, ensure_ascii=False))
-
 
     except WebSocketDisconnect:
         print("[WebSocket] 클라이언트 정상 종료")
@@ -349,32 +278,81 @@ async def realtime_socket(ws: WebSocket):
         traceback.print_exc()
         print(f"[WebSocket] 비정상 종료: {e}")
 
-    # 9. 발표 종료 시 열려있는 segment 정리
+    # ── 9. 발표 종료 시 열려있는 segment 정리 ← 기존 그대로 ─────────────────
     finally:
-        now = time.time()
+        now         = time.time()
         elapsed_now = now - presentation_start_time
-
-        # speech_fast/slow는 이미 경과 시간으로 저장, 나머지는 절대 시간으로 저장
         already_elapsed = {"speech_fast", "speech_slow"}
 
         for seg_type, start_time in active_segments.items():
-
             if start_time is not None:
-                if seg_type in already_elapsed:
-                    start_elapsed = start_time
-                else:
-                    start_elapsed = start_time - presentation_start_time
+                start_elapsed = start_time if seg_type in already_elapsed else start_time - presentation_start_time
+                await save_segment(presentation_id, seg_type, start_elapsed, elapsed_now)
 
-                await save_segment(
-                    presentation_id,
-                    seg_type,
-                    start_elapsed,
-                    elapsed_now
-                )   
-        
         try:
             if ws.application_state.name not in ('DISCONNECTED',) and ws.client_state.name != 'DISCONNECTED':
                 await ws.close()
         except RuntimeError:
             pass
-        
+
+
+# ── STT 오인식 문장 필터 ──────────────────────────────────────────────────────
+
+async def _filter_context(context: str, quality_threshold: float = 0.3) -> str:
+    """quality_score 기반으로 오인식/헛소리 문장을 제거한 컨텍스트 반환."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|(?<=다)\s+", context) if s.strip()]
+    if not sentences:
+        return context
+    loop = asyncio.get_event_loop()
+    scores = await loop.run_in_executor(None, scorer._batch_quality_scores, sentences)
+    filtered = [s for s, q in zip(sentences, scores) if q >= quality_threshold]
+    print(f"[SurpriseQ] 컨텍스트 필터: {len(sentences)}문장 → {len(filtered)}문장 (threshold={quality_threshold})")
+    return " ".join(filtered) if filtered else context
+
+
+# ── 돌발 질문 전송 (백그라운드 태스크) ───────────────────────────────────────
+
+async def _send_question(
+    ws, sq_manager: SurpriseQuestionManager,
+    presentation_id: str, presentation_start_time: float,
+):
+    raw_context = sq_manager.get_context()
+    context = await _filter_context(raw_context)
+    if not context.strip():
+        context = raw_context
+    try:
+        print(f"[SurpriseQ] GPT 질문 생성 중... (컨텍스트 {len(context.split())}단어)")
+        q_result = await surprise_question_service.generate_question(context, sq_manager.asked_questions)
+        if not q_result:
+            print("[SurpriseQ] 질문 생성 실패 — IDLE 복귀")
+            sq_manager.reset_to_idle()
+            return
+
+        question_id = uuid.uuid4().hex
+        asked_at_seconds = time.time() - presentation_start_time
+
+        # Redis에 질문 + 타임스탬프 저장 (배치 분석에서 답변 위치 특정에 사용)
+        await save_question_pending(
+            presentation_id, question_id,
+            q_result["question"], asked_at_seconds, context,
+        )
+
+        # 클라이언트에 질문 전송
+        await ws.send_text(json.dumps({
+            "type":        "surprise_question",
+            "question_id": question_id,
+            "question":    q_result["question"],
+            "time_limit":  30,
+        }, ensure_ascii=False))
+
+        print(f"[SurpriseQ] ✅ 질문 전송 완료")
+        print(f"[SurpriseQ]    question_id      : {question_id}")
+        print(f"[SurpriseQ]    question         : {q_result['question']}")
+        print(f"[SurpriseQ]    asked_at_seconds : {round(asked_at_seconds, 1)}초")
+
+        # 즉시 IDLE 복귀 → 다음 질문 준비
+        sq_manager.set_triggered(q_result["question"])
+
+    except Exception as e:
+        print(f"[SurpriseQ] 질문 생성 태스크 실패: {e}")
+        sq_manager.reset_to_idle()
