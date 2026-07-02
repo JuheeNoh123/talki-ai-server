@@ -214,7 +214,7 @@ async def realtime_socket(ws: WebSocket):
 
                 # [신규] STT 완료 후 돌발 질문 트리거 체크
                 sq_manager.add_stt(speech_result.get("text", ""))
-
+                print(f"[SurpriseQ] STT 텍스트: '{speech_result.get('text', '')}' / 누적: {sq_manager.accumulated_words}단어")  # 추가
                 if sq_manager.should_trigger(current_time):
                     elapsed = round(current_time - presentation_start_time, 1)
                     print(f"[SurpriseQ] 트리거 발동 — 누적 단어: {sq_manager.accumulated_words}개, 경과: {elapsed}초")
