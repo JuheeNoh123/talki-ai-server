@@ -38,10 +38,11 @@ app.add_middleware(
 )
 
 
-from app.routers import analyze_router, realtime_router
+from app.routers import analyze_router, realtime_router, practice_router
 # 라우터 등록
 app.include_router(analyze_router.router, tags=["Analyze"])
 app.include_router(realtime_router.router, prefix="", tags=["Realtime Analysis"])
+app.include_router(practice_router.router, prefix="", tags=["Practice"])
 
 from fastapi import Request
 

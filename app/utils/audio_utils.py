@@ -93,6 +93,7 @@ def speech_stats(transcribe_result, min_seconds=3.0):
             "text": text, "wpm": 0.0, "cps": 0.0, "duration": 0.0,
             "fillers_count": 0, "fillers_freq": 0.0,
             "silence_count": 0, "total_silence_sec": 0.0, "silence_ratio": 0.0,
+            "avg_word_probability": 0.0,
         }
 
     start = segs[0]["start"]
@@ -163,6 +164,15 @@ def speech_stats(transcribe_result, min_seconds=3.0):
     total_silence_sec = round(sum(silence_gaps), 2)
     silence_ratio = round(total_silence_sec / dur, 3) if dur > 0 else 0.0
 
+    # 단어별 confidence(probability) 평균 — 연습 탭 "발음 명확도" 근사치로 사용
+    word_probs = [
+        w.get("probability", 0.0)
+        for seg in segs
+        for w in seg.get("words", [])
+        if w.get("probability") is not None
+    ]
+    avg_word_probability = round(sum(word_probs) / len(word_probs), 3) if word_probs else 0.0
+
     return {
         "text": text,
         "wpm": float(wpm),
@@ -175,4 +185,5 @@ def speech_stats(transcribe_result, min_seconds=3.0):
         "silence_count": silence_count,
         "total_silence_sec": total_silence_sec,
         "silence_ratio": silence_ratio,
+        "avg_word_probability": avg_word_probability,
     }
